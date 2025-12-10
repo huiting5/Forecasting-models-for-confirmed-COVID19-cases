@@ -1,0 +1,197 @@
+---
+title: "Forecasting models for confirmed COVID19 cases"
+author: "Huiting Wu"
+date: "3/7/2025"
+format: 
+  html:
+    embed-resources: true
+    page-layout: full
+    df-print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+For the COVID19 data from United States develop the best forecasting models for *confirmed* cases and produce a forecast for the next 30 days, after the end of the available data.  Note that the data is recorded daily.
+
+```{r}
+library(pacman)
+p_load(tidyverse, fpp3, COVID19, MASS, purrr)
+```
+
+```{r}
+covid_data <- covid19(c("United States"))
+covid_data <- covid_data |>  as_tsibble(key = "id", index = "date")
+```
+
+> Produce an STL decomposition of the data.
+
+The start date is 2020-01-21 and the end date is 2023-03-23. 
+
+There is an increasing trend over the years. 
+
+There is a seasonality. There are most confirmed cases in the beginning of a year and then decreasing until the end of the year, Then, there is an increasing in the beginning of the next year.
+
+There are some weekly pattern. There are variations in confirmed cases by weekly.
+
+There is a big step increasing in 2022 and a big step of decreasing in 2023 in the remainder. 
+
+```{r, fig.height=8}
+covid_data |> autoplot(confirmed)
+
+# filter missing value in confirmed
+covid_data <- covid_data  |> 
+   filter(!is.na(confirmed)) 
+
+# Check the date range
+ range(covid_data$date)
+ 
+# STL decomposition
+covid_data |> 
+  model(STL(confirmed)) |> 
+  components() |> 
+  autoplot()
+```
+
+> Transforming
+
+The data need transformation seems there is trend, seasonality, and the variability is not constant. 
+
+The maximum lambda is 0.67 which is closer to 0.5
+
+A square root transformation is applied.
+
+```{r}
+# check transformation
+b <- boxcox(lm(confirmed ~ date, data = covid_data))
+b$x[which.max(b$y)]
+```
+
+> Stationary
+
+The data is not stationary. A square root transformation, a weekly differencing, and a 1st differencing applied. The data is approximately stationary with constant mean of confirmed cases.
+
+```{r}
+# check if data is stationary
+covid_data |> 
+  features(sqrt(confirmed), unitroot_kpss)
+
+# check number of differencing
+covid_data |> 
+  features(sqrt(confirmed), unitroot_ndiffs)
+
+# check stationary
+
+# transformation, seasonal diff, 1st diff
+covid_data |> transmute(
+  original = confirmed,
+  sqrt = sqrt(confirmed),
+  weekly_diff = difference(sqrt(confirmed), 7), 
+  first_diff = difference(difference(sqrt(confirmed), 7), 1)) |> 
+   pivot_longer(-date, names_to = "Type", values_to = "confirmed") |> 
+   mutate(Type = factor(Type, levels = c(
+     "original",
+     "sqrt",
+     "weekly_diff",
+     "first_diff"
+   ))) |> 
+ ggplot(aes(x = date, y = confirmed)) + 
+   geom_line() +
+   facet_grid(vars(Type), scales = "free_y")
+
+# seasonal diff, 1st diff
+covid_data |> transmute(
+  original = confirmed,
+  sqrt = sqrt(confirmed),
+  weekly_diff = difference(sqrt(confirmed), 7), 
+  first_diff = difference(difference(sqrt(confirmed), 7), 1)) |> 
+   pivot_longer(-date, names_to = "Type", values_to = "confirmed") |> 
+   mutate(Type = factor(Type, levels = c(
+     "original",
+     "sqrt",
+     "weekly_diff",
+     "first_diff"
+   ))) |> 
+ ggplot(aes(x = date, y = confirmed)) + 
+   geom_line() +
+   facet_grid(vars(Type), scales = "free_y")
+
+# 1st diff, 2nd diff
+covid_data |> transmute(
+  original = confirmed,
+  sqrt = sqrt(confirmed),
+  first_diff = difference(sqrt(confirmed), 1), 
+  second_diff = difference(difference(sqrt(confirmed), 1), 1)) |> 
+   pivot_longer(-date, names_to = "Type", values_to = "confirmed") |> 
+   mutate(Type = factor(Type, levels = c(
+     "original",
+     "sqrt",
+     "first_diff",
+     "second_diff"
+   ))) |> 
+ ggplot(aes(x = date, y = confirmed)) + 
+   geom_line() +
+   facet_grid(vars(Type), scales = "free_y")
+```
+
+> ARIMA models
+
+Comparing ARIMA(3,1,0)(1,1,0) and ARIMA(3,1,0)(0,1,1), the lower AICc is the model ARIMA(3,1,0)(0,1,1) which is slightly smaller. The best model is ARIMA(3,1,0)(0,1,1).
+
+```{r}
+covid_data |> 
+  gg_tsdisplay(difference(difference(sqrt(confirmed), 7), 1), 
+               plot_type = "partial")
+
+covid_data |> model(arima310011 = ARIMA(sqrt(confirmed) ~ pdq(3,1,0) + PDQ(0,1,1)),
+                    arima310110 = ARIMA(sqrt(confirmed) ~ pdq(3,1,0) + PDQ(1,1,0))) |>
+  report()
+```
+
+> Estimate the parameters of the best model
+
+The estimate for parameters are:
+
+$\phi_1$: 1.8125
+
+$\phi_2$: -0.8293
+
+$\theta_1$: -1.6349
+
+$\theta_2$: 0.7566
+
+$\Theta_1$: -0.4895
+
+$\Theta_2$: 0.0647
+
+$sigma^2$: 9.944
+
+The residuals of ARIMA(3,1,0)(0,1,1) model has some pattern but overall there is no trend. There are some other information is not getting by the model. The best model is ARIMA(2,1,2)(0,1,2)[7]. There are less significant ACF of residuals. The histogram of the residual looks approximately normal.
+
+```{r}
+# ARIMA(3,1,0)(1,1,0)
+fit <- covid_data |> model(ARIMA(sqrt(confirmed) ~ pdq(3,1,0) + PDQ(0,1,1))) 
+fit |> report()
+fit |> gg_tsresiduals()
+
+# better model
+best_fit <- covid_data |> model(ARIMA(sqrt(confirmed))) 
+best_fit |> report()
+best_fit |> gg_tsresiduals()
+```
+
+> Forecast the next 25 weeks. 
+
+The model forecast the trend and weekly seasonality of the data.
+
+```{r}
+fcast <- forecast(best_fit, h = 25)
+fcast
+
+fcast |> 
+  autoplot(covid_data |> filter_index("2023-01-01" ~ .))
+```
+
+
+
